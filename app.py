@@ -1,20 +1,28 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+# In[4]:
+
+
+#!/usr/bin/env python
+# coding: utf-8
+
 # In[7]:
 
 
 import streamlit as st
 import pandas as pd
 import io
+import re
+from fuzzywuzzy import process
 from google.cloud import storage
 from google.cloud import aiplatform
 from vertexai.generative_models import GenerativeModel
 
 # --- Configuration ---
-PROJECT_ID = "gen-ai-rajan-labs"  # Replace with your Project ID
-LOCATION = "us-central1"  # e.g., "us-central1"
-GCS_BUCKET_NAME = "publicip_carrier_data" # Replace with your bucket name
+PROJECT_ID = "gen-ai-rajan-labs"
+LOCATION = "us-central1"
+GCS_BUCKET_NAME = "publicip_carrier_data"
 
 # File paths in GCS
 PEAK_USAGE_FILE = "carrier_peak_usage.xlsx"
@@ -125,8 +133,15 @@ if df_merged is not None:
     st.subheader("Underutilized Carriers")
     if 'standardized_carrier_name' in df_merged.columns and 'configured_capacity' in df_merged.columns and 'peak_usage' in df_merged.columns and 'usage_percentage' in df_merged.columns and 'proposed_capacity' in df_merged.columns:
         underutilized_threshold = st.sidebar.slider("Usage Threshold (%)", 0.0, 100.0, 40.0)
-        df_underutilized_display = df_merged[df_merged['usage_percentage'] < underutilized_threshold]
-        st.dataframe(df_underutilized_display[['standardized_carrier_name', 'configured_capacity', 'peak_usage', 'usage_percentage', 'proposed_capacity']].head())
+        df_underutilized = df_merged.copy()
+        df_underutilized['peak_usage'] = pd.to_numeric(df_underutilized['peak_usage'], errors='coerce')
+        df_underutilized['configured_capacity'] = pd.to_numeric(df_underutilized['configured_capacity'], errors='coerce')
+        df_underutilized.dropna(subset=['peak_usage', 'configured_capacity'], inplace=True)
+        df_underutilized = df_underutilized[df_underutilized['configured_capacity'] > 0]
+        df_underutilized['usage_percentage'] = (df_underutilized['peak_usage'] / df_underutilized['configured_capacity']) * 100
+        df_underutilized = df_underutilized[df_underutilized['usage_percentage'] < underutilized_threshold].copy()
+        df_underutilized['proposed_capacity'] = (df_underutilized['configured_capacity'] * 0.5).round().astype(int)
+        st.dataframe(df_underutilized[['standardized_carrier_name', 'configured_capacity', 'peak_usage', 'usage_percentage', 'proposed_capacity']])
     else:
         st.warning("Required columns for underutilized carriers not found.")
 
@@ -138,15 +153,31 @@ if df_merged is not None:
         if user_question:
             with st.spinner("Thinking..."):
                 context_prompt = f"""
-                You are a helpful AI assistant for a telecom solutions architect. You have access to data about Public IP Carriers.
-                The data includes carrier names, peak SIP session usage, configured capacity, account manager details (both internal and carrier-side), and first-line support contacts.
-                Carrier names have been standardized.
+                    You are a helpful AI assistant for a telecom solutions architect. You have access to data about Public IP Carriers.
+                    The data includes carrier names, peak SIP session usage, configured capacity, account manager details (both internal and carrier-side),
+                    and first-line support contacts. The data comes from three sources and has been merged. Carrier names have been standardized.
+                    
+                    You are a helpful AI assistant for a telecom solutions architect. You have access to data about Public IP Carriers.
+                    The data includes the following information for each carrier:
+                    - **carrier_name**: The name of the carrier.
+                    - **peak_usage**: The peak number of concurrent SIP sessions observed.
+                    - **configured_capacity**: The total configured capacity for SIP sessions (this represents the number of sessions).
+                    - **configured_trunks**: The number of configured trunks (this is a separate metric from session capacity).
+                    - **used_trunks**: The number of trunks that were used.
+                    - Account manager details (both internal and carrier-side).
+                    - First-line support contacts.
 
-                Here is a sample of the data:
-                {df_merged.head().to_string()}
 
-                Answer the user's query: {user_question}
-                """
+                    Available Data Columns Overview: {', '.join(df_merged.columns.tolist()) if df_merged is not None else 'Data not available'}
+                    Total Carriers in Merged Data: {len(df_merged['standardized_carrier_name'].unique()) if df_merged is not None else 0}
+
+                    **Full Carrier Data:**
+                    {df_merged.to_string()}
+
+                    User Query: {user_question}
+
+                    Answer:
+                    """
                 try:
                     response = model.generate_content(context_prompt)
                     st.write("Answer:", response.text)
